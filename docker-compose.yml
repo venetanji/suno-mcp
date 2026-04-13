@@ -1,0 +1,12 @@
+services:
+  suno-mcp:
+    build: .
+    ports:
+      - "6080:6080"
+    volumes:
+      - ./downloads:/downloads
+      - ./data:/data
+    environment:
+      - SUNO_DOWNLOAD_DIR=/downloads
+      - SUNO_AUTH_DIR=/data
+    restart: unless-stopped
