@@ -32,6 +32,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxss1 \
     libgtk-3-0 \
     libx11-xcb1 \
+    openbox \
+    xterm \
+    x11-utils \
     && rm -rf /var/lib/apt/lists/*
 
 # Install uv for fast Python package management
@@ -45,7 +48,7 @@ COPY src/ ./src/
 # Create venv and install dependencies
 RUN uv venv /app/.venv --python python3.11 \
     && . /app/.venv/bin/activate \
-    && uv pip install . \
+    && uv pip install -e . \
     && playwright install chromium --with-deps
 
 # Create volume directories
@@ -56,7 +59,8 @@ COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 
 # Entrypoint script
 COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+COPY start-openbox.sh /start-openbox.sh
+RUN chmod +x /entrypoint.sh /start-openbox.sh
 
 EXPOSE 6080
 

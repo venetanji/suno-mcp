@@ -1,5 +1,6 @@
 """Suno authentication via Clerk - browser login and token management."""
 
+import asyncio
 import json
 import logging
 import os
@@ -52,27 +53,55 @@ class SunoAuth:
         self.settings.auth_file.write_text(json.dumps(data, indent=2))
 
     def is_authenticated(self) -> bool:
-        return bool(self._cookie and self._session_id)
+        return bool(self._jwt and (self._session_id or self._cookie))
 
     async def login_with_browser(self) -> None:
-        """Open a headed Chromium browser for Google OAuth login via Suno."""
+        """Open a headed Chromium browser for Google OAuth login via Suno.
+
+        Uses network interception to capture the Clerk JWT token directly
+        from the browser's API calls rather than extracting cookies.
+        Uses a persistent profile so the session survives container restarts.
+        """
         os.environ.setdefault("DISPLAY", self.settings.display)
+        profile_dir = str(self.settings.auth_dir / "chrome-profile")
+
+        captured: dict = {}
 
         async with async_playwright() as pw:
-            browser = await pw.chromium.launch(
+            context = await pw.chromium.launch_persistent_context(
+                profile_dir,
                 headless=False,
                 args=[
                     "--disable-blink-features=AutomationControlled",
                     "--no-sandbox",
                 ],
-            )
-            context = await browser.new_context(
                 viewport={"width": 1280, "height": 900},
                 user_agent=(
                     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
                     "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
                 ),
             )
+
+            # Intercept Clerk token responses to capture JWT directly.
+            async def on_response(response):
+                if "/v1/client/sessions/" in response.url and "/tokens" in response.url:
+                    try:
+                        data = await response.json()
+                        jwt = data.get("jwt") or data.get("token")
+                        if jwt:
+                            captured["jwt"] = jwt
+                            logger.info("Captured Clerk JWT from network response")
+                            # Also grab session_id from URL
+                            parts = response.url.split("/")
+                            if "sessions" in parts:
+                                idx = parts.index("sessions")
+                                if idx + 1 < len(parts):
+                                    captured["session_id"] = parts[idx + 1]
+                    except Exception as e:
+                        logger.warning("Failed to parse Clerk token response: %s", e)
+
+            context.on("response", on_response)
+
             page = await context.new_page()
             await page.goto("https://suno.com/signin")
 
@@ -81,40 +110,48 @@ class SunoAuth:
                 "Complete Google login via noVNC at http://<host>:6080"
             )
 
-            try:
-                await page.wait_for_url(
-                    "**/create**", timeout=300_000
+            # Wait up to 5 minutes for the JWT to be captured via interception.
+            deadline = time.monotonic() + 300
+            while time.monotonic() < deadline:
+                await asyncio.sleep(2)
+                if captured.get("jwt"):
+                    break
+                # Also grab cookies as fallback for is_authenticated check
+                cookies = await context.cookies("https://suno.com")
+                cookie_map = {c["name"]: c["value"] for c in cookies}
+                uat = cookie_map.get("__client_uat", "0")
+                logger.info("Waiting for Clerk JWT capture — uat=%s jwt=%s", uat, bool(captured.get("jwt")))
+            else:
+                await context.close()
+                raise AuthenticationError(
+                    "Login timed out. Please complete the Google login "
+                    "within 5 minutes via noVNC."
                 )
-            except Exception:
-                try:
-                    await page.wait_for_url(
-                        "**/feed**", timeout=5_000
-                    )
-                except Exception:
-                    await browser.close()
-                    raise AuthenticationError(
-                        "Login timed out. Please complete the Google login "
-                        "within 5 minutes via noVNC."
-                    )
 
+            # Grab final cookies for the cookie header
             cookies = await context.cookies("https://suno.com")
-            await browser.close()
+            await context.close()
 
         cookie_map = {c["name"]: c["value"] for c in cookies}
-        client_uat = cookie_map.get("__client_uat")
-        session_cookie = cookie_map.get("__session")
+        uat = cookie_map.get("__client_uat", "")
+        session = cookie_map.get("__session", "")
 
-        if not client_uat:
-            raise AuthenticationError(
-                "Could not extract Clerk cookies after login."
-            )
+        # Build cookie string from whatever we have
+        parts = []
+        if uat:
+            parts.append(f"__client_uat={uat}")
+        if session:
+            parts.append(f"__session={session}")
+        self._cookie = "; ".join(parts) if parts else "__client_uat=1"
 
-        self._cookie = f"__client_uat={client_uat}"
-        if session_cookie:
-            self._cookie += f"; __session={session_cookie}"
+        # JWT captured directly from network — skip Clerk API roundtrip
+        self._jwt = captured["jwt"]
+        self._jwt_timestamp = time.time()
+        if captured.get("session_id"):
+            self._session_id = captured["session_id"]
 
-        await self._fetch_session_id()
-        await self._refresh_jwt()
+        if not self._session_id:
+            await self._fetch_session_id()
         self._save_session()
 
     async def _fetch_session_id(self) -> None:
@@ -132,12 +169,18 @@ class SunoAuth:
             data = resp.json()
 
         sessions = data.get("response", {}).get("sessions", [])
+        logger.info("Clerk /v1/client response keys: %s, sessions: %d", list(data.keys()), len(sessions))
         if not sessions:
-            raise AuthenticationError("No active Clerk sessions found.")
+            raise AuthenticationError(
+                f"No active Clerk sessions found. Response: {str(data)[:500]}"
+            )
 
         active = [s for s in sessions if s.get("status") == "active"]
         if not active:
-            raise AuthenticationError("No active Clerk sessions found.")
+            statuses = [s.get("status") for s in sessions]
+            raise AuthenticationError(
+                f"No active Clerk sessions found. Session statuses: {statuses}"
+            )
 
         self._session_id = active[0]["id"]
 
