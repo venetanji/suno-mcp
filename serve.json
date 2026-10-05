@@ -1,17 +1,26 @@
 {
   "TCP": {
-    "443": {
-      "HTTPS": true
-    },
-    "6080": {
-      "TCPForward": "localhost:6081"
+    "80": {
+      "HTTP": true
     }
   },
   "Web": {
-    "${TS_CERT_DOMAIN}:443": {
+    "suno-mcp.tail.ait4x.org:80": {
       "Handlers": {
+        "/mcp": {
+          "Proxy": "http://suno-mcp-suno-mcp-1:8085"
+        },
+        "/audio/": {
+          "Proxy": "http://suno-mcp-suno-mcp-1:8085"
+        },
+        "/api/": {
+          "Proxy": "http://suno-mcp-suno-mcp-1:8085/api/"
+        },
+        "/websockify": {
+          "Proxy": "http://suno-mcp-suno-mcp-1:6081"
+        },
         "/": {
-          "Proxy": "http://127.0.0.1:8085"
+          "Proxy": "http://suno-mcp-suno-mcp-1:6081"
         }
       }
     }

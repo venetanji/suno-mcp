@@ -49,7 +49,7 @@ COPY src/ ./src/
 RUN uv venv /app/.venv --python python3.11 \
     && . /app/.venv/bin/activate \
     && uv pip install -e . \
-    && playwright install chromium --with-deps
+    && playwright install chrome --with-deps
 
 # Create volume directories
 RUN mkdir -p /downloads /data

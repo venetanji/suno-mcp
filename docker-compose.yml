@@ -1,30 +1,48 @@
 services:
-  tailscale:
-    image: tailscale/tailscale:latest
+  headscale:
+    image: comfy-docker-tailscale:local
     hostname: suno-mcp
     restart: unless-stopped
+    init: true
+    logging: &bounded-logging
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     environment:
-      - TS_AUTHKEY=${TS_AUTHKEY:?TS_AUTHKEY is required}
-      - TS_EXTRA_ARGS=--advertise-tags=tag:container
+      - TS_AUTHKEY=${HS_AUTHKEY:?HS_AUTHKEY is required}
+      - TS_EXTRA_ARGS=--login-server=https://headscale.ait4x.org --accept-dns=false
       - TS_STATE_DIR=/var/lib/tailscale
+      - TS_AUTH_ONCE=true
       - TS_SERVE_CONFIG=/config/serve.json
       - TS_USERSPACE=false
+      - TS_DEBUG_FIREWALL_MODE=nftables
     volumes:
-      - /home/venetanji/dev/suno-mcp/serve.json:/config/serve.json
-      - tailscale-data:/var/lib/tailscale
+      - ./serve.json:/config/serve.json:ro
+      - headscale-data:/var/lib/tailscale
+    devices:
       - /dev/net/tun:/dev/net/tun
     cap_add:
       - NET_ADMIN
-      - NET_RAW
-    ports:
-      - "6080:6080"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        (until [ -e /sys/class/net/tailscale0 ]; do sleep 1; done
+         ethtool -K tailscale0 tso off gso off gro off) &
+        exec /usr/local/bin/containerboot
+    networks:
+      - default
+      - tailscale-mesh
 
   suno-mcp:
+    image: suno-mcp-suno-mcp:rest-20261005
     build: .
-    network_mode: service:tailscale
     restart: unless-stopped
-    depends_on:
-      - tailscale
+    logging: *bounded-logging
+    ports:
+      - 8085:8085
+    networks:
+      - default
     volumes:
       - ./downloads:/downloads
       - ./data:/data
@@ -34,6 +52,17 @@ services:
       - SUNO_AUTH_DIR=/data
       - SUNO_HOST=0.0.0.0
       - SUNO_PORT=8085
+      - SUNO_PUBLIC_URL=http://suno-mcp.tail.ait4x.org
+      - SUNO_REST_API_TOKEN=${SUNO_REST_API_TOKEN:-}
+      - SUNO_REST_UPLOAD_MAX_BYTES=${SUNO_REST_UPLOAD_MAX_BYTES:-104857600}
+      - SUNO_BROWSER_QUEUE_CAPACITY=${SUNO_BROWSER_QUEUE_CAPACITY:-8}
+      - SUNO_BROWSER_QUEUE_TIMEOUT=${SUNO_BROWSER_QUEUE_TIMEOUT:-15}
+      - SUNO_BROWSER_OPERATION_TIMEOUT=${SUNO_BROWSER_OPERATION_TIMEOUT:-120}
 
 volumes:
-  tailscale-data:
+  headscale-data:
+
+networks:
+  default:
+  tailscale-mesh:
+    external: true
