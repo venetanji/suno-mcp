@@ -2,7 +2,8 @@
 
 Generate music, speech, and sound effects through Suno's native browser interface
 using MCP or REST. The container runs Google Chrome Stable, a persistent login profile,
-and a noVNC desktop for login and human CAPTCHA completion. Playwright controls
+and a 1920x1080 (16:9) noVNC desktop for login and human CAPTCHA completion. Chrome
+starts maximized and uses the actual window viewport. Playwright controls
 regular Chrome; it does not install Chrome for Testing or spoof an older browser.
 
 ## Running
@@ -50,7 +51,9 @@ docker compose exec headscale tailscale serve --bg --http=80 --set-path=/api/ \
 | --- | --- | --- |
 | GET | `/health` | Browser readiness; no login navigation. |
 | POST | `/login` | Check Suno login or open interactive login in noVNC; does not wait for human input. |
+| POST | `/browser/recover` | Reopen closed Chrome using the saved profile, without another Create or automatic abandonment. |
 | POST | `/generate/music` | All music options, including uploaded/existing audio references and up to four inspiration tracks. |
+| POST | `/generate/cover` | Cover an existing song or uploaded audio by ID, preserving source lyrics unless replaced. |
 | POST | `/generate/speech` | Script, tone, background music, gender, and variety. |
 | POST | `/generate/sound` | One-shot or loop, prompt, and optional BPM. |
 | GET | `/generation/status` | Poll the shared generation and CAPTCHA state. |
@@ -115,7 +118,10 @@ state and cannot undo an accepted Suno request. MCP cancellation uses the same
 admission cleanup. `/generation/status` exposes queue/deadline state under
 `operations`. Keep upstream HTTP timeouts above queue wait plus execution time
 (Easel defaults to 180 seconds). This is an in-memory admission queue, not a
-durable job queue or per-client generation history; restarting loses that state.
+durable job queue or per-client generation history. Queue and cache state reset
+on restart. The latest generation is checkpointed privately in
+`data/generation-state.json`; an unconfirmed checkpoint stays guarded after a
+restart because the original browser confirmation cannot be resumed safely.
 
 Examples (add the Authorization header if configured):
 
@@ -147,9 +153,11 @@ uploads remain there for reuse. The original audio is not transcoded.
 | --- | --- |
 | `suno_login` | Check authentication or wait for interactive login. |
 | `generate_song` | Lyrics, styles, title, excluded styles, model, sliders, vocal gender, duration, references, and inspiration. |
+| `cover_song` | Cover an existing song or upload by ID with a new style; keep or replace lyrics, or make it instrumental. |
 | `generate_speech` | Script, delivery tone, background music, vocal gender, and variety. |
 | `generate_sound` | One-shot effects or loops, with an optional BPM setting. |
 | `get_generation_status` | Check submission confirmation, CAPTCHA state, and frequency counters without clicking Create again. |
+| `recover_browser` | Reopen closed Chrome without submitting or clearing an unresolved attempt. |
 | `abandon_generation_wait` | Explicitly abandon a stuck local wait using its exact attempt ID; this cannot undo an accepted Suno request. |
 | `get_song` | Read a track's status, preview URL, and available audio metadata. |
 | `upload_audio` | Upload a file with explicit permission confirmation and obtain its reference ID. |
@@ -162,6 +170,31 @@ generation response confirmed new track IDs; it does not mean the audio is
 finished. Poll `get_song` for each returned ID until `complete` or `error`.
 `preview_url` opens the track in Suno. An unavailable or restricted `audio_url`
 is `null`, never a guessed CDN URL. Generation failures are MCP tool errors.
+
+### CAPTCHA And Unconfirmed Submissions
+
+Solve Suno's CAPTCHA manually via noVNC, then poll `get_generation_status`
+or `GET /api/v1/generation/status`. Do not repeat Create or a generation POST
+to clear a challenge. Status polling never submits another song. Hidden frames
+and empty CAPTCHA containers do not count as active challenges.
+
+`captcha_detected` records whether the attempt ever encountered a CAPTCHA;
+`captcha_visible` reports its current inspected visibility. Visibility is `null`
+when unknown or no longer inspected. Browser inspection has a two-second
+deadline; a failure returns `captcha_check_error` without clearing the pending
+submission. The counters measure visible CAPTCHA episodes, not individual
+puzzle rounds. New attempts expose `started_at`, `confirmation_elapsed_seconds`,
+and `confirmation_stalled` while awaiting confirmation. A stalled attempt
+remains guarded; it is never retried automatically.
+
+Only native clip-generation requests from the original creation tab can confirm
+an attempt. Lyrics-writing requests and other tabs cannot overwrite it. A
+network failure, unreadable response, server error, or successful response with
+no usable clip IDs leaves acceptance unknown and sets `recovery_required`.
+Inspect your Suno library before explicitly calling `abandon_generation_wait`
+with the exact attempt ID. Abandoning a local wait cannot cancel an accepted
+Suno request or refund credits. This tracking cannot prevent Suno from issuing
+CAPTCHAs or establish why it challenges a particular browser session.
 
 All generation tools accept `dry_run: true` to prepare the form without clicking
 Create or spending generation credits. Inspiration dry-runs can still create
@@ -211,6 +244,31 @@ Example sound arguments:
 ```
 
 ## Audio References
+
+An existing Suno song can be used directly: uploading it again is not necessary.
+Copy its UUID from the song URL, or use the `id` returned by a previous generation.
+Call `cover_song` with that UUID and the desired style:
+
+```json
+{
+  "source_song_id": "EXISTING_SONG_OR_UPLOAD_UUID",
+  "tags": "acoustic folk, warm guitar, intimate vocals",
+  "audio_influence": 50,
+  "dry_run": true
+}
+```
+
+The REST equivalent is `POST /api/v1/generate/cover` with the same JSON.
+Omitted or null `lyrics` preserves the source lyrics; pass replacement lyrics
+explicitly, or set `make_instrumental: true` to clear them. For uploaded audio
+without source lyrics, supply your own lyrics if you want vocals. Model, duration,
+vocal gender, excluded styles, weirdness, style/audio influence, and variety use
+the same options as music
+generation. Remove `dry_run` or set it to false to submit one Create. Prepared
+and generation receipts include `reference_audio_id` and `audio_mode` so callers
+can verify the selected source. Not every track/account is eligible for covers;
+unavailable source controls fail before Create instead of picking a different
+song from the playbar or recommendations.
 
 Place authorized audio in `data/uploads/` on the Docker host, then call
 `upload_audio` with the container path:
@@ -262,6 +320,19 @@ remains stuck, first inspect your Suno library for newly created tracks. Then
 call `abandon_generation_wait` with the exact `attempt_id` from status to close
 the old browser flow. This is explicit recovery, not an automatic retry or a
 refund; an already accepted request can still finish on Suno.
+
+Closing the Chrome window or its generation tab loses the original CAPTCHA
+flow. Status polling does not create a blank tab or keep asking you to solve a
+missing challenge: it returns `status: "pending"`, `recovery_required: true`,
+the same `attempt_id`, a recovery reason, and instructions. It also reports
+browser connectivity under `browser`; health returns 503 while Chrome is closed.
+Call `recover_browser` through MCP or `POST /api/v1/browser/recover` to reopen
+Chrome with the saved login profile. For an unresolved attempt it opens your
+library for inspection, not another Create. Inspect for newly accepted tracks
+before explicitly abandoning that exact attempt ID. Browser recovery never
+retries a submission, bypasses a CAPTCHA, abandons a wait, or refunds credits.
+The checkpoint can contain lyrics/options: treat the ignored `data` directory
+as private account data, just like the Chrome profile.
 
 Generation credits and native export allowance are separate. `download_song`
 saves the decoded audio actually used by the authenticated browser player,

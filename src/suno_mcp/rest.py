@@ -74,6 +74,23 @@ class SpeechRequest(RequestModel):
     dry_run: bool = False
 
 
+class CoverRequest(RequestModel):
+    source_song_id: UUID
+    tags: str = Field(min_length=1, max_length=1000)
+    lyrics: str | None = Field(default=None, max_length=5000)
+    title: str = ""
+    make_instrumental: bool = False
+    negative_prompt: str = Field(default="", max_length=1000)
+    model: str = ""
+    weirdness: int | None = Field(default=None, ge=0, le=100)
+    style_influence: int | None = Field(default=None, ge=0, le=100)
+    variety: int | None = Field(default=None, ge=0, le=4)
+    vocal_gender: VocalGender = ""
+    duration_seconds: int | None = Field(default=None, ge=10, le=360)
+    audio_influence: int | None = Field(default=None, ge=0, le=100)
+    dry_run: bool = False
+
+
 class SoundRequest(RequestModel):
     prompt: str = Field(min_length=1, max_length=500)
     sound_type: Literal["one_shot", "loop"] = "one_shot"
@@ -165,6 +182,8 @@ async def _call(browser: SunoBrowser, operation: str, request: Request | None = 
         ) from error
     except RuntimeError as error:
         message = str(error)
+        if message.startswith("The Chrome window was closed"):
+            raise _error(503, "browser_closed", message, browser=browser.get_browser_status()) from error
         if "awaiting confirmation" in message:
             raise _error(
                 409, "generation_pending", message, generation=await browser.get_generation_status(),
@@ -251,8 +270,16 @@ def create_rest_app() -> FastAPI:
 
     @app.get("/v1/health", tags=["Status"])
     async def health():
-        ready = app.state.browser is not None
-        return JSONResponse({"status": "ok" if ready else "starting", "browser_ready": ready}, status_code=200 if ready else 503)
+        browser = app.state.browser
+        ready = browser is not None and browser.browser_available
+        return JSONResponse(
+            {"status": "ok" if ready else "browser_closed" if browser is not None else "starting", "browser_ready": ready},
+            status_code=200 if ready else 503,
+        )
+
+    @router.post("/browser/recover", tags=["Session"], response_model=dict[str, Any])
+    async def recover(request: Request, browser: Annotated[SunoBrowser, Depends(_browser)]):
+        return await _call(browser, "recover_browser", request=request)
 
     @router.post("/login", tags=["Session"], response_model=dict[str, Any], responses={202: {"description": "Complete login through noVNC."}})
     async def login(request: Request, browser: Annotated[SunoBrowser, Depends(_browser)]):
@@ -266,6 +293,10 @@ def create_rest_app() -> FastAPI:
     @router.post("/generate/music", tags=["Generation"], responses={202: {"description": "Generation accepted, pending, or CAPTCHA required."}})
     async def music(body: MusicRequest, request: Request, browser: Annotated[SunoBrowser, Depends(_browser)]):
         return _result(await _call(browser, "generate_song", request=request, **body.model_dump(mode="json")))
+
+    @router.post("/generate/cover", tags=["Generation"], responses={202: {"description": "Cover accepted, pending, or CAPTCHA required."}})
+    async def cover(body: CoverRequest, request: Request, browser: Annotated[SunoBrowser, Depends(_browser)]):
+        return _result(await _call(browser, "cover_song", request=request, **body.model_dump(mode="json")))
 
     @router.post("/generate/speech", tags=["Generation"], responses={202: {"description": "Generation accepted, pending, or CAPTCHA required."}})
     async def speech(body: SpeechRequest, request: Request, browser: Annotated[SunoBrowser, Depends(_browser)]):

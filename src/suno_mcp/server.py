@@ -39,6 +39,7 @@ mcp = FastMCP(
         "MCP server for generating AI music with Suno via browser automation. "
         "Use suno_login first to authenticate (only needed once — session persists). "
         "Use generate_song, generate_speech, or generate_sound. "
+        "Use cover_song for covers of existing Suno songs or uploaded audio by ID; existing songs need no re-upload. "
         "If a CAPTCHA appears, solve it via noVNC and call get_generation_status, "
         "not generate_song again. Use upload_audio for audio you have permission to upload. "
         "Downloaded songs are served at /audio/{filename} on this server."
@@ -79,6 +80,7 @@ async def suno_login(ctx: Context) -> str:
         "tags: style/genre/mood descriptors e.g. 'trip hop, minor key, cinematic'. "
         "Returns confirmed song IDs, or captcha_required with a noVNC URL. "
         "reference_audio_id reuses an uploaded or existing song as a Cover or Extend. "
+        "Prefer cover_song when covering a track and keeping its source lyrics. "
         "inspiration_ids accepts up to four existing tracks. "
         "dry_run fills the form without clicking Create or spending generation credits."
     ),
@@ -138,9 +140,47 @@ async def generate_song(
         raise ToolError(str(e)) from e
 
 
-@mcp.tool(description="Check the current generation after solving a CAPTCHA; never submits another Create. Includes CAPTCHA frequency counters since server startup.")
+@mcp.tool(description="Cover an existing Suno song or uploaded audio by its UUID; no re-upload is needed. tags describes the new style. Omit lyrics (or use null) to keep the source lyrics, pass replacement lyrics, or set make_instrumental=true. Supports the music sliders, model, duration, and dry_run without spending credits. CAPTCHA and pending attempts use get_generation_status; never retry Create blindly.")
+async def cover_song(
+    source_song_id: str, tags: str, lyrics: str | None = None,
+    title: str = "", make_instrumental: bool = False, negative_prompt: str = "",
+    model: str = "", weirdness: int | None = None, style_influence: int | None = None,
+    variety: int | None = None, vocal_gender: Literal["", "male", "female"] = "",
+    duration_seconds: int | None = None, audio_influence: int | None = None,
+    dry_run: bool = False, ctx: Context = None,
+) -> dict:
+    await ctx.info(f"Preparing cover of {source_song_id}...")
+    try:
+        result = await _get_browser(ctx).cover_song(
+            source_song_id=source_song_id, tags=tags, lyrics=lyrics,
+            title=title, make_instrumental=make_instrumental, negative_prompt=negative_prompt,
+            model=model, weirdness=weirdness, style_influence=style_influence,
+            variety=variety, vocal_gender=vocal_gender, duration_seconds=duration_seconds,
+            audio_influence=audio_influence, dry_run=dry_run,
+        )
+        if result["status"] == "captcha_required":
+            await ctx.warning(result["message"] + " " + result["novnc_url"])
+        if result["status"] == "error":
+            raise ToolError(result["message"])
+        return result
+    except (RuntimeError, ValueError) as error:
+        raise ToolError(str(error)) from error
+    except Exception as error:
+        logger.exception("Unexpected error during cover generation")
+        raise ToolError(str(error)) from error
+
+
+@mcp.tool(description="Check generation confirmation without another Create. Reports current CAPTCHA visibility, inspection errors, stalled confirmation, and visible CAPTCHA episode counters since startup; individual puzzle rounds are not counted. Failed or unreadable submissions stay guarded until their exact attempt is explicitly abandoned after checking the library.")
 async def get_generation_status(ctx: Context) -> dict:
     return await _get_browser(ctx).get_generation_status()
+
+
+@mcp.tool(description="Reopen a closed Chrome window using the saved login profile without clicking Create or abandoning an unresolved attempt. Lost CAPTCHA confirmations remain guarded; inspect the library via noVNC before explicit abandonment.")
+async def recover_browser(ctx: Context) -> dict:
+    try:
+        return await _get_browser(ctx).recover_browser()
+    except RuntimeError as error:
+        raise ToolError(str(error)) from error
 
 
 @mcp.tool(description="Abandon an unconfirmed browser wait only after a CAPTCHA was canceled or the attempt is stuck. Requires its exact attempt_id. This cannot cancel an accepted Suno request or refund credits; check your library before retrying.")
@@ -276,7 +316,8 @@ async def _debug_browser(browser: SunoBrowser, panel: str, selection: str, song_
         elif panel == "inspiration":
             await page.get_by_role("dialog").get_by_text(selection, exact=False).last.click(timeout=10_000)
         elif panel == "library":
-            await page.get_by_role("tab", name=selection, exact=True).click(timeout=10_000)
+            role = "button" if selection in {"Liked", "Public", "Uploads"} else "tab"
+            await page.get_by_role(role, name=selection, exact=True).click(timeout=10_000)
         elif panel == "current" and selection in {"Add to Playlist", "Remix", "New Playlist", "Create Playlist", "Play", "Pause", "Playbar: Play button", "Playbar: Pause button", "More options", "Download"}:
             button = page.get_by_role("button", name=selection, exact=True)
             if not await button.count():
@@ -299,6 +340,7 @@ async def _debug_browser(browser: SunoBrowser, panel: str, selection: str, song_
         const ta = Array.from(document.querySelectorAll('textarea'));
         const inp = Array.from(document.querySelectorAll('input:not([type=hidden])'));
         return {
+            viewport: {width: innerWidth, height: innerHeight, screenWidth: screen.width, screenHeight: screen.height},
             contenteditable: ce.map(e => ({html: e.outerHTML.slice(0, 600), text: e.innerText, visible: !!e.getClientRects().length})),
             textareas: ta.map(e => ({placeholder: e.placeholder, value: e.value, visible: !!e.getClientRects().length})),
             inputs: inp.map(e => ({html: e.outerHTML.slice(0, 600), visible: !!e.getClientRects().length})),
