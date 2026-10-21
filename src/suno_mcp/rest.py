@@ -51,7 +51,7 @@ class MusicRequest(RequestModel):
     title: str = ""
     make_instrumental: bool = False
     negative_prompt: str = Field(default="", max_length=1000)
-    model: str = ""
+    model: str = Field(default="", description="Exact ID from GET /api/v1/models, including custom models. Omitted or blank uses SUNO_DEFAULT_MODEL.")
     weirdness: int | None = Field(default=None, ge=0, le=100)
     style_influence: int | None = Field(default=None, ge=0, le=100)
     variety: int | None = Field(default=None, ge=0, le=4)
@@ -81,7 +81,7 @@ class CoverRequest(RequestModel):
     title: str = ""
     make_instrumental: bool = False
     negative_prompt: str = Field(default="", max_length=1000)
-    model: str = ""
+    model: str = Field(default="", description="Exact ID from GET /api/v1/models, including custom models. Omitted or blank uses SUNO_DEFAULT_MODEL.")
     weirdness: int | None = Field(default=None, ge=0, le=100)
     style_influence: int | None = Field(default=None, ge=0, le=100)
     variety: int | None = Field(default=None, ge=0, le=4)
@@ -289,6 +289,10 @@ def create_rest_app() -> FastAPI:
             {"status": "login_required", "novnc_url": f"{request.app.state.settings.base_url}/vnc.html?autoconnect=1&resize=scale"},
             status_code=202,
         )
+
+    @router.get("/models", tags=["Generation"], response_model=dict[str, Any])
+    async def models(request: Request, browser: Annotated[SunoBrowser, Depends(_browser)]):
+        return await _call(browser, "list_models", request=request)
 
     @router.post("/generate/music", tags=["Generation"], responses={202: {"description": "Generation accepted, pending, or CAPTCHA required."}})
     async def music(body: MusicRequest, request: Request, browser: Annotated[SunoBrowser, Depends(_browser)]):

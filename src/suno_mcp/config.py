@@ -1,8 +1,9 @@
 """Configuration management via environment variables."""
 
 from pathlib import Path
+from typing import Annotated
 
-from pydantic import Field
+from pydantic import Field, StringConstraints
 from pydantic_settings import BaseSettings
 
 
@@ -20,6 +21,7 @@ class Settings(BaseSettings):
     poll_timeout: float = 300.0
     display: str = ":99"
     browser_channel: str = "chrome"
+    default_model: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)] = "v6"
     clerk_js_version: str = "5.61.0"
     rest_api_token: str = ""
     rest_upload_max_bytes: int = Field(default=100 * 1024 * 1024, gt=0)

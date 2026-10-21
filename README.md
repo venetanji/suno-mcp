@@ -32,6 +32,66 @@ Call `suno_login` and complete login in noVNC if needed. Login persists in
 Keep MCP and noVNC on a trusted network; they control a logged-in browser and
 are not intended to be exposed publicly without access controls.
 
+## Optional Instrumental Schedule
+
+The opt-in `song-scheduler` service submits one instrumental Create every two
+hours, starting two hours after its first startup. It uses the existing MCP
+server and Chrome session; starting it does not restart Chrome or open another
+browser. It rotates original style prompts and titles and pins the server's
+configured default model when first initialized. Set `SUNO_SCHEDULE_MODEL` to
+choose a specific exact model ID instead. Built-in lyric/style generation is
+not invoked by this instrumental worker.
+
+```sh
+docker compose --profile scheduler up -d --no-deps song-scheduler
+docker compose exec song-scheduler python -m suno_mcp.scheduler status
+docker compose exec song-scheduler python -m suno_mcp.scheduler pause
+docker compose exec song-scheduler python -m suno_mcp.scheduler resume
+```
+
+`SUNO_SCHEDULE_INTERVAL_SECONDS` defaults to `7200` (minimum `300`).
+For an hourly experiment, set `SUNO_SCHEDULE_INTERVAL_SECONDS=3600` in `.env`
+and recreate only the worker with
+`docker compose --profile scheduler up -d --no-deps song-scheduler`. This leaves
+the existing Chrome session running; use `resume` if the worker was paused.
+`SUNO_SCHEDULE_CREDIT_RESERVE` defaults to `100`: no new scheduled Create is
+submitted when the observed balance is at or below it. Each Create can return
+multiple tracks; neither the track count nor its credit cost is assumed.
+
+Exact credit snapshots come from Suno's `Credits remaining` accessibility label,
+not the rounded `8.5k` display. Balance sampling selects the music Create panel,
+including after completion when the browser may be showing a song page.
+If the exact label has not loaded, the worker retries reading it with bounded
+backoff, then checks again on its next worker cycle. Missing balances never
+permit a new Create, but do not permanently pause an otherwise healthy worker.
+The private `data/schedule/state.json` stores the
+initial/latest balances, observation time, next run, confirmed submission/track
+counts, and the active/last run. `data/schedule/history.jsonl` preserves balance
+snapshots, prompts, track IDs, and outcomes. Balance differences are net account
+changes, not guaranteed scheduler-only spending: manual use and credit refills
+can also change them. This is periodic sampling, not a real-time billing feed.
+
+CAPTCHAs, stalled or lost confirmations, and unavailable models pause further
+scheduled submissions. Unreadable balances defer submission until an exact
+balance is available. Ordinary pending confirmations remain under
+observation without pausing the schedule or clicking Create again; stalled or
+lost confirmations pause it. Accepted submissions must match the scheduled
+title, style, and instrumental setting before their tracks are counted.
+Between scheduled runs, an initialized idle worker leaves the browser alone.
+Tracking continues for an existing attempt;
+solve any challenge and confirm the outcome before explicitly resuming. Resume
+waits another full interval and never retries the old Create. If a crash lost
+the original confirmation, inspect the Suno library and recover/abandon its
+browser wait as necessary before using
+`python -m suno_mcp.scheduler resume --acknowledge-uncertain`. A saved pre-submit
+checkpoint and a cross-process lock prevent automatic retries and overlapping
+workers. Missed intervals never produce a catch-up burst. To stop the worker
+entirely, use `docker compose stop song-scheduler`; Chrome remains running.
+
+Regular generation is an experiment, not a proven CAPTCHA-prevention mechanism.
+Both checkbox and image challenges require human completion via noVNC; the
+worker does not solve CAPTCHAs or retry a blocked Create.
+
 ## REST API
 
 REST and MCP share one authenticated Chrome instance, browser-operation lock,
@@ -207,6 +267,19 @@ model's live controls. Duration is set using the native `m:ss` input. Empty
 lyrics produce instrumental music; `make_instrumental: true` rejects nonempty
 lyrics rather than silently discarding them. Model availability and reference
 options depend on the current Suno account and interface.
+
+Music and cover requests always explicitly select a model. Omitted or blank
+`model` uses `SUNO_DEFAULT_MODEL` (defaults to `v6`), not the browser's previous
+selection. Set `SUNO_DEFAULT_MODEL` in `.env` to your custom model's exact name
+to make it the default for both MCP and REST. Explicit `model` overrides it.
+Unavailable models fail before Create; there is no silent fallback.
+
+Use MCP `list_models` or authenticated `GET /api/v1/models` to discover live
+base and custom model IDs for the logged-in account. The response includes
+`default_model`, `selected_model`, and `data` entries with `id`, `custom`,
+`available`, `selected`, and `default`. Discovery shares the browser queue and
+pending-generation guard, leaves the selected model unchanged, and spends no
+generation credits. Music and cover results include the selected `suno_model`.
 
 Example music arguments:
 

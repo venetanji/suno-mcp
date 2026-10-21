@@ -39,6 +39,8 @@ mcp = FastMCP(
         "MCP server for generating AI music with Suno via browser automation. "
         "Use suno_login first to authenticate (only needed once — session persists). "
         "Use generate_song, generate_speech, or generate_sound. "
+        "Use list_models to discover base and account-specific custom music models and the configured default. "
+        "Omitting model uses SUNO_DEFAULT_MODEL, never the browser's previous selection. "
         "Use cover_song for covers of existing Suno songs or uploaded audio by ID; existing songs need no re-upload. "
         "If a CAPTCHA appears, solve it via noVNC and call get_generation_status, "
         "not generate_song again. Use upload_audio for audio you have permission to upload. "
@@ -82,6 +84,7 @@ async def suno_login(ctx: Context) -> str:
         "reference_audio_id reuses an uploaded or existing song as a Cover or Extend. "
         "Prefer cover_song when covering a track and keeping its source lyrics. "
         "inspiration_ids accepts up to four existing tracks. "
+        "model is an exact ID from list_models, including custom models; omitted or blank uses SUNO_DEFAULT_MODEL. "
         "dry_run fills the form without clicking Create or spending generation credits."
     ),
 )
@@ -140,7 +143,7 @@ async def generate_song(
         raise ToolError(str(e)) from e
 
 
-@mcp.tool(description="Cover an existing Suno song or uploaded audio by its UUID; no re-upload is needed. tags describes the new style. Omit lyrics (or use null) to keep the source lyrics, pass replacement lyrics, or set make_instrumental=true. Supports the music sliders, model, duration, and dry_run without spending credits. CAPTCHA and pending attempts use get_generation_status; never retry Create blindly.")
+@mcp.tool(description="Cover an existing Suno song or uploaded audio by its UUID; no re-upload is needed. tags describes the new style. Omit lyrics (or use null) to keep the source lyrics, pass replacement lyrics, or set make_instrumental=true. Supports the music sliders, model, duration, and dry_run without spending credits. model is an exact ID from list_models, including custom models; omitted or blank uses SUNO_DEFAULT_MODEL. CAPTCHA and pending attempts use get_generation_status; never retry Create blindly.")
 async def cover_song(
     source_song_id: str, tags: str, lyrics: str | None = None,
     title: str = "", make_instrumental: bool = False, negative_prompt: str = "",
@@ -267,6 +270,14 @@ async def get_upload_status(ctx: Context) -> dict:
     return _get_browser(ctx).get_upload_status()
 
 
+@mcp.tool(description="List the logged-in account's selectable Suno music models, including custom models, the configured default, and current selection. Does not change the selected model, submit Create, or spend credits. Shares the browser queue and pending-generation guard.")
+async def list_models(ctx: Context) -> dict:
+    try:
+        return await _get_browser(ctx).list_models()
+    except (RuntimeError, ValueError) as error:
+        raise ToolError(str(error)) from error
+
+
 @mcp.tool(description="Take a screenshot and return detailed page state for debugging.")
 async def debug_browser(
     ctx: Context,
@@ -308,7 +319,7 @@ async def _debug_browser(browser: SunoBrowser, panel: str, selection: str, song_
         await page.get_by_role("button", name=re.compile("inspiration", re.I)).first.click(timeout=10_000)
         await page.wait_for_timeout(500)
     elif panel == "models":
-        await page.get_by_role("button", name=re.compile(r"^v\d")).first.click()
+        await browser._model_picker(page).click(timeout=10_000)
         await page.wait_for_timeout(500)
     if selection:
         if panel == "audio":
@@ -345,6 +356,12 @@ async def _debug_browser(browser: SunoBrowser, panel: str, selection: str, song_
             textareas: ta.map(e => ({placeholder: e.placeholder, value: e.value, visible: !!e.getClientRects().length})),
             inputs: inp.map(e => ({html: e.outerHTML.slice(0, 600), visible: !!e.getClientRects().length})),
             controls: Array.from(document.querySelectorAll('[role=slider], [role=checkbox], [role=switch], [role=combobox]')).map(e => e.outerHTML.slice(0, 800)),
+            createFormHeader: (() => {
+                let header = document.querySelector('[role=tablist][aria-label="Create form mode"]');
+                while (header && !header.querySelector('button[aria-haspopup=dialog]')) header = header.parentElement;
+                return header?.outerHTML.slice(0, 12000);
+            })(),
+            modelDialog: document.querySelector('[role=dialog]:has([role=grid])')?.outerHTML.slice(0, 18000),
             frames: Array.from(document.querySelectorAll('iframe')).map(e => ({src: e.src, visible: !!e.getClientRects().length})),
             text: document.body.innerText.slice(0, 18000),
             fieldParents: ta.concat(inp).filter(e => e.placeholder).map(e => ({placeholder: e.placeholder, rect: e.getBoundingClientRect().toJSON(), parent: e.parentElement.outerHTML.slice(0, 1800)})),

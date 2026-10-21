@@ -52,12 +52,34 @@ services:
       - SUNO_AUTH_DIR=/data
       - SUNO_HOST=0.0.0.0
       - SUNO_PORT=8085
+      - SUNO_DEFAULT_MODEL=${SUNO_DEFAULT_MODEL:-v6}
       - SUNO_PUBLIC_URL=http://suno-mcp.tail.ait4x.org
       - SUNO_REST_API_TOKEN=${SUNO_REST_API_TOKEN:-}
       - SUNO_REST_UPLOAD_MAX_BYTES=${SUNO_REST_UPLOAD_MAX_BYTES:-104857600}
       - SUNO_BROWSER_QUEUE_CAPACITY=${SUNO_BROWSER_QUEUE_CAPACITY:-8}
       - SUNO_BROWSER_QUEUE_TIMEOUT=${SUNO_BROWSER_QUEUE_TIMEOUT:-15}
       - SUNO_BROWSER_OPERATION_TIMEOUT=${SUNO_BROWSER_OPERATION_TIMEOUT:-120}
+
+  song-scheduler:
+    image: suno-mcp-suno-mcp:rest-20261005
+    profiles: [scheduler]
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 3m
+    logging: *bounded-logging
+    entrypoint: ["/app/.venv/bin/python", "-m", "suno_mcp.scheduler"]
+    depends_on:
+      - suno-mcp
+    networks:
+      - default
+    volumes:
+      - ./src:/app/src:ro
+      - ./data/schedule:/data/schedule
+    environment:
+      - SUNO_SCHEDULE_MCP_URL=http://suno-mcp:8085/
+      - SUNO_SCHEDULE_INTERVAL_SECONDS=${SUNO_SCHEDULE_INTERVAL_SECONDS:-7200}
+      - SUNO_SCHEDULE_CREDIT_RESERVE=${SUNO_SCHEDULE_CREDIT_RESERVE:-100}
+      - SUNO_SCHEDULE_MODEL=${SUNO_SCHEDULE_MODEL:-}
 
 volumes:
   headscale-data:

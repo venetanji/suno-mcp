@@ -536,6 +536,91 @@ class SunoBrowser:
             await confirmation.get_by_role("button", name="Confirm", exact=True).click(timeout=10_000)
             await confirmation.wait_for(state="hidden", timeout=10_000)
 
+    def _model_picker(self, page: Page):
+        mode = page.get_by_role("tablist", name="Create form mode", exact=True)
+        header = mode.locator("xpath=ancestor::*[.//button[@aria-haspopup='dialog']][1]")
+        return header.locator("button[aria-haspopup='dialog']")
+
+    async def _music_models(self, page: Page):
+        await page.keyboard.press("Escape")
+        await self._model_picker(page).click(timeout=10_000)
+        dialog = page.get_by_role("dialog", name="Model", exact=True)
+        await dialog.wait_for(state="visible", timeout=10_000)
+        grid = dialog.get_by_role("grid", name="Model", exact=True)
+        await grid.get_by_role("gridcell", name="All Models", exact=True).wait_for(timeout=10_000)
+        models = []
+        model_choices = []
+        custom = None
+        choices = grid.get_by_role("row")
+        for index in range(await choices.count()):
+            choice = choices.nth(index)
+            cell = choice.get_by_role("gridcell").first
+            selected = await choice.get_attribute("aria-selected")
+            if selected is None:
+                heading = (await cell.text_content() or "").strip()
+                if heading in {"My Models", "All Models"}:
+                    custom = heading == "My Models"
+                continue
+            if custom is None:
+                continue
+            text = await cell.evaluate("""element => {
+                const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+                while (walker.nextNode()) {
+                    const label = walker.currentNode.textContent.trim();
+                    if (label) return label;
+                }
+                return '';
+            }""")
+            if not text:
+                raise RuntimeError("Suno returned an empty model label; no generation was submitted.")
+            if custom:
+                label = text.splitlines()[0].strip()
+            else:
+                version = re.match(r"^v\d[\w.+-]*", text)
+                if not version:
+                    raise RuntimeError("Suno returned an unrecognized model label; no generation was submitted.")
+                label = version.group()
+            models.append({
+                "id": label, "object": "model", "custom": custom,
+                "selected": selected == "true",
+                "available": await choice.is_enabled() and await cell.is_enabled(),
+                "default": label == self.settings.default_model,
+            })
+            model_choices.append(cell)
+        if not models:
+            raise RuntimeError("Suno's model picker is empty; no generation was submitted.")
+        return dialog, models, model_choices
+
+    async def list_models(self) -> dict:
+        self._guard_pending()
+        async with self._operations.run("list_models"):
+            self._guard_pending()
+            page = await self._create_page()
+            await self._songs_form(page)
+            try:
+                _dialog, models, _choices = await self._music_models(page)
+                return {
+                    "object": "list", "default_model": self.settings.default_model,
+                    "selected_model": next((entry["id"] for entry in models if entry["selected"]), None),
+                    "data": models,
+                }
+            finally:
+                await page.keyboard.press("Escape")
+
+    async def _select_music_model(self, page: Page, model: str) -> str:
+        label = model.strip() or self.settings.default_model
+        try:
+            dialog, models, choices = await self._music_models(page)
+            selected_index = next((index for index, entry in enumerate(models) if entry["id"] == label), None)
+            if selected_index is None or not models[selected_index]["available"]:
+                available = ", ".join(entry["id"] for entry in models if entry["available"])
+                raise ValueError(f"Suno model '{label}' is unavailable. Available models: {available}. No generation was submitted.")
+            await choices[selected_index].click(timeout=10_000)
+            await dialog.wait_for(state="hidden", timeout=10_000)
+            return label
+        finally:
+            await page.keyboard.press("Escape")
+
     async def _submit(self, page: Page, button_name: str, dry_run: bool, reference: dict | None = None) -> dict:
         await page.screenshot(path=str(self.settings.auth_dir / "debug_pre_create.png"))
         if dry_run:
@@ -749,9 +834,7 @@ class SunoBrowser:
                 await self._songs_form(page)
             if inspiration_ids or inspiration_playlist:
                 await self._set_inspiration(page, inspiration_ids or [], inspiration_playlist)
-            if model:
-                await page.get_by_role("button", name=re.compile(r"^v\d")).first.click()
-                await page.get_by_text(model, exact=True).last.click(timeout=10_000)
+            model = await self._select_music_model(page, model)
             lyrics_field = page.get_by_role("textbox", name="Lyrics editor", exact=True)
             if lyrics is None:
                 lyrics = await lyrics_field.evaluate("element => element.isContentEditable ? element.innerText : element.value")
@@ -791,7 +874,7 @@ class SunoBrowser:
             for field, value in ((lyrics_field, lyrics), (styles, tags), (title_field, title), (excluded_styles, negative_prompt)):
                 await self._verify_value(field, value)
             reference = {"reference_audio_id": reference_audio_id, "audio_mode": audio_mode} if reference_audio_id else None
-            return await self._submit(page, "Create song", dry_run, reference)
+            return await self._submit(page, "Create song", dry_run, {**(reference or {}), "suno_model": model})
 
     async def _set_inspiration(self, page: Page, song_ids: list[str], playlist_name: str = ""):
         if song_ids:
